@@ -47,25 +47,30 @@ private:
   //---------------------------------------------------------------------------
 
   // state
-  bool initialized_;
-  int ignore_images_;
+  bool initialized_; //!< Flag for whether the VO algorithm has been initialized
+  int ignore_images_; //!< The number of images to display on startup (to allow for exposure level to settle out)
+  bool display_; //!< Flag for whether to display debugging images
 
   // ROS
-  ros::NodeHandle nh_;
-  ros::NodeHandle nh_private_;
+  ros::NodeHandle nh_; //!< Public node handle
+  ros::NodeHandle nh_private_; //!< Private node handle
 
-  ros::Subscriber image_subscriber_;
-  ros::Publisher pose_publisher_;
+  ros::Subscriber image_subscriber_; //!< Subscriber for RGB images
+  ros::Publisher pose_publisher_; //!< Publisher for computed pose
 
   // VO
-  cv_bridge::CvImagePtr keyframe_image_;
-  std::vector<cv::KeyPoint> keyframe_features_;
-  cv::Mat keyframe_descriptors_;
+  double inlier_threshold_; //!< Distance threshold for a keypoint to be considered an inlier
 
-  cv::FeatureDetector* feature_detector_;
-  cv::DescriptorExtractor* descriptor_extractor_;
-  cv::DescriptorMatcher* forward_matcher_;
-  cv::DescriptorMatcher* reverse_matcher_;
+  cv_bridge::CvImagePtr keyframe_image_; //!< The keyframe image
+  std::vector<cv::KeyPoint> keyframe_keypoints_; //!< The keyframe feature keypoints
+  cv::Mat keyframe_descriptors_; //!< The descriptors associated with the keyframe features
+
+  cv::RNG* rng_; //!< Random number generator for creating RANSAC samples
+
+  cv::FeatureDetector* feature_detector_; //!< OpenCV feature detector
+  cv::DescriptorExtractor* descriptor_extractor_; //!< OpenCV descriptor extractor
+  cv::DescriptorMatcher* forward_matcher_; //!< OpenCV descriptor matcher for forward search
+  cv::DescriptorMatcher* reverse_matcher_; //!< OpenCV descriptor matcher for reverse search
 
   //---------------------------------------------------------------------------
   // private methods
@@ -75,9 +80,111 @@ private:
   void imageCallback(const sensor_msgs::Image::ConstPtr& msg);
 
   // helper functions
-  void detectFeatures(const cv_bridge::CvImagePtr& image, std::vector<cv::KeyPoint>& keypoints);
-  void computeDescriptors(const cv_bridge::CvImagePtr& image, std::vector<cv::KeyPoint>& keypoints, cv::Mat& descriptors);
-  void computeMatches(const cv::Mat& current_descriptors, const cv::Mat& keyframe_descriptors, std::vector<cv::DMatch>& matches);
+
+  /**
+   * \brief Detects features in the given image
+   * \param[in] image The image on which to detect features
+   * \param[out] keypoints The detected features
+   */
+  void detectFeatures(const cv_bridge::CvImagePtr& image, std::vector<cv::KeyPoint>* keypoints);
+
+  /**
+   * \brief Computes descriptors from an image for a given list of keypoints
+   * \param[in] image The image from which to compute descriptors
+   * \param[in,out] keypoints The keypoints for which to compute descriptors. Keypoints for which descriptors cannot be
+   *                          computed will be removed from the list
+   * \param[out] descriptors The computed descriptors
+   */
+  void computeDescriptors(const cv_bridge::CvImagePtr& image,
+                          std::vector<cv::KeyPoint>* keypoints,
+                          cv::Mat* descriptors);
+
+  /**
+   * \brief Computes correspondences between two sets of features using a brute force search and forward/reverse mutual
+   * consistency check
+   * \param[in] reference_descriptors List of descriptors for the reference image
+   * \param[in] current_descriptors List of descriptors for the current image
+   * \param[out] matches List of correspondences between the reference and current images
+   */
+  void computeMatches(const cv::Mat& reference_descriptors,
+                      const cv::Mat& current_descriptors,
+                      std::vector<cv::DMatch>* matches);
+
+  /**
+   * \brief Selects a random sample of corresponding keypoints
+   *
+   * \attention The input feature lists must be ordered, i.e. reference_keypoints[i] must correspond to
+   * current_keypoints[i] for all values of i. The sample will similarly be returned in an ordered fashion.
+   *
+   * \param[in] sample_size The desired sample size
+   * \param[in] reference_keypoints The ordered list of reference keypoints from which to select the sample
+   * \param[in] current_keypoints The ordered list of current keypoints from which to select the sample
+   * \param[out] reference_sample The ordered list of reference keypoints in the random sample
+   * \param[out] current_sample The ordered list of current keypoints in the random sample
+   */
+  void getRandomSample(int sample_size,
+                       const std::vector<cv::KeyPoint>& reference_keypoints,
+                       const std::vector<cv::KeyPoint>& current_keypoints,
+                       std::vector<cv::KeyPoint>* reference_sample,
+                       std::vector<cv::KeyPoint>* current_sample);
+
+  /**
+   * \brief Computes the set of solutions for a given sample
+   *
+   * \attention The sample keypoint lists must be ordered, i.e. reference_sample[i] must correspond to current_sample[i]
+   * for all values of i.
+   *
+   * \param[in] reference_sample The ordered sample of reference keypoints
+   * \param[in] current_sample The ordered sample of current keypoints
+   * \param[out] E The list of all valid solutions of the essential matrix for the sample
+   * \param[out] P The list of all valid solutions of the projection matrix for the sample
+   * \return True if the solution was successfully computed, false otherwise
+   */
+  bool sampleSolution(const std::vector<cv::KeyPoint>& reference_sample,
+                      const std::vector<cv::KeyPoint>& current_sample,
+                      std::vector<cv::Mat>* E,
+                      std::vector<cv::Mat>* P);
+
+  /**
+   * \brief Computes the reprojection error associated with a solution
+   *
+   * \attention The input feature lists must be ordered, i.e. reference_keypoints[i] must correspond to
+   * current_keypoints[i] for all values of i.
+   *
+   * \param[in] reference_keypoints The ordered list of keypoints for the reference image
+   * \param[in] current_keypoints The ordered list of keypoints for the current image
+   * \param[in] E The essential matrix solution
+   * \param[in] P The projection matrix solution
+   * \param[out] error The error associated with each keypoint correspondence
+   * \param[out] inliers The list of indices in the keypoint lists of inliers for the current solution
+   * \return The sum total error associated with the current solution
+   */
+  double solutionError(const std::vector<cv::KeyPoint>& reference_keypoints,
+                       const std::vector<cv::KeyPoint>& current_keypoints,
+                       const cv::Mat& E,
+                       const cv::Mat& P,
+                       std::vector<double>* error,
+                       std::vector<int>* inliers);
+
+  /**
+   * \brief Runs the requested number of RANSAC iterations and returns the best solution
+   *
+   * \attention The input feature lists must be ordered, i.e. reference_keypoints[i] must correspond to
+   * current_keypoints[i] for all values of i. The sample will similarly be returned as ordered lists.
+   *
+   * \param[in] num_iterations The number of iterations to run
+   * \param[in] reference_keypoints The ordered list of reference keypoints
+   * \param[in] current_keypoints The ordered list of current keypoints
+   * \param[out] E The best essential matrix solution
+   * \param[out] P The best projection matrix solution
+   * \param[out] inliers The list of indices in the keypoint lists of inliers to the best solution
+   */
+  void runRANSAC(int num_iterations,
+                 const std::vector<cv::KeyPoint>& reference_keypoints,
+                 const std::vector<cv::KeyPoint>& current_keypoints,
+                 cv::Mat* E,
+                 cv::Mat* P,
+                 std::vector<int>* inliers);
 
 public:
 

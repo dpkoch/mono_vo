@@ -11,12 +11,10 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
 )
-#set(vrpn_DIR /usr/local/lib)
+
 ## System dependencies are found with CMake's conventions
-# find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
-#find_package(vrpn REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -96,7 +94,10 @@ catkin_package(
 
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
-include_directories(include/mono_vo)
+include_directories(
+  include/mono_vo
+  src/5point
+)
 include_directories(
   ${catkin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
@@ -104,24 +105,30 @@ include_directories(
 )
 
 ## Declare a cpp library
-# add_library(mono_vo
-#   src/${PROJECT_NAME}/mono_vo.cpp
-# )
+add_library(5point
+  src/5point/5point.cpp
+  src/5point/Rpoly.cpp
+)
 
 ## Declare a cpp executable
-add_executable(mono_vo_node src/mono_vo_node.cpp src/mono_vo.cpp)
+add_executable(mono_vo_node
+  src/mono_vo_node.cpp
+  src/mono_vo.cpp
+)
 
 ## Add cmake target dependencies of the executable/library
 ## as an example, message headers may need to be generated before nodes
 # add_dependencies(mono_vo_node mono_vo_generate_messages_cpp)
 
 ## Specify libraries to link a library or executable target against
- target_link_libraries(mono_vo_node
-   ${catkin_LIBRARIES}
-   ${OpenCV_LIBRARIES}
-#   ${vrpn_LIBRARIES}
-   vrpn
- )
+target_link_libraries(5point
+  ${OpenCV_LIBRARIES}
+)
+target_link_libraries(mono_vo_node
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  5point
+)
 
 #############
 ## Install ##
