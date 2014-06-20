@@ -5,9 +5,19 @@
  */
 
 #include <ros/ros.h>
+
 #include <sensor_msgs/Image.h>
+#include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/image_encodings.h>
+#include <sensor_msgs/distortion_models.h>
+
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
+
+#include <message_filters/subscriber.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+
+#include <boost/bind.hpp>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
@@ -16,14 +26,18 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/nonfree/nonfree.hpp>
 
-
 #include <cv_bridge/cv_bridge.h>
+
+#include <string>
+#include <vector>
 
 namespace mono_vo
 {
 
 static const std::string CURRENT_IMAGE_WINDOW = "Current Image";
 static const std::string MATCHES_WINDOW = "Matches";
+
+typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::CameraInfo> sync_policy_t;
 
 /**
  * \class MonoVO
@@ -37,6 +51,8 @@ static const std::string MATCHES_WINDOW = "Matches";
  *     Conference on Computer Vision and Pattern Recognition, 2004, vol. 1, pp. 652–659.
  * [4] D. Nistér, “Preemptive RANSAC for live structure and motion estimation,” Mach. Vis. Appl., vol. 16, no. 5,
  *     pp. 321–329, Nov. 2005.
+ * [5] Hartley, Richard, and Andrew Zisserman. Multiple view geometry in computer vision. Cambridge university press,
+ *     2003.
  */
 class MonoVO
 {
@@ -55,14 +71,20 @@ private:
   ros::NodeHandle nh_; //!< Public node handle
   ros::NodeHandle nh_private_; //!< Private node handle
 
-  ros::Subscriber image_subscriber_; //!< Subscriber for RGB images
+  message_filters::Subscriber<sensor_msgs::Image>* image_subscriber_; //!< Subscriber for RGB images
+  message_filters::Subscriber<sensor_msgs::CameraInfo>* camera_info_subscriber_; //!< Subscriber for camera info topic
+  message_filters::Synchronizer<sync_policy_t>* synchronizer_; //!< Message synchronizer to get image and calibration info at the same time
+
   ros::Publisher pose_publisher_; //!< Publisher for computed pose
+
+  std::string frame_id_; //!< TF frame in which to publish pose messages
 
   // VO
   double inlier_threshold_; //!< Distance threshold for a keypoint to be considered an inlier
 
   cv_bridge::CvImagePtr keyframe_image_; //!< The keyframe image
-  std::vector<cv::KeyPoint> keyframe_keypoints_; //!< The keyframe feature keypoints
+  std::vector<cv::KeyPoint> keyframe_keypoints_pixel_; //!< The keyframe feature keypoints in pixel coordinates
+  std::vector<cv::KeyPoint> keyframe_keypoints_; //!< The keyframe feature keypoints in normalized image coordinates
   cv::Mat keyframe_descriptors_; //!< The descriptors associated with the keyframe features
 
   cv::RNG* rng_; //!< Random number generator for creating RANSAC samples
@@ -72,21 +94,27 @@ private:
   cv::DescriptorMatcher* forward_matcher_; //!< OpenCV descriptor matcher for forward search
   cv::DescriptorMatcher* reverse_matcher_; //!< OpenCV descriptor matcher for reverse search
 
+  cv::Mat K_; //!< Intrinsic camera matrix [fx 0 cx; 0 fy cy; 0 0 1]
+  cv::Mat D_; //!< Camera distortion parameters [k1 k2 p1 p2 k3]
+
   //---------------------------------------------------------------------------
   // private methods
   //---------------------------------------------------------------------------
 
   // callbacks
-  void imageCallback(const sensor_msgs::Image::ConstPtr& msg);
+  void imageCallback(const sensor_msgs::Image::ConstPtr& image_msg, const sensor_msgs::CameraInfo::ConstPtr &info_msg);
 
   // helper functions
 
   /**
    * \brief Detects features in the given image
    * \param[in] image The image on which to detect features
-   * \param[out] keypoints The detected features
+   * \param[out] keypoints_pixel The detected features in pixel coordinates
+   * \param[out] keypoints The detected features in normalized coordinates
    */
-  void detectFeatures(const cv_bridge::CvImagePtr& image, std::vector<cv::KeyPoint>* keypoints);
+  void detectFeatures(const cv_bridge::CvImagePtr& image,
+                      std::vector<cv::KeyPoint>* keypoints_pixel,
+                      std::vector<cv::KeyPoint>* keypoints);
 
   /**
    * \brief Computes descriptors from an image for a given list of keypoints

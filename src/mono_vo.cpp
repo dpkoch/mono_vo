@@ -19,9 +19,14 @@ MonoVO::MonoVO() :
 {
   // parameters
   nh_private_.param<bool>("display", display_, false);
+  nh_private_.param<std::string>("frame_id", frame_id_, "mono_vo");
 
   // ROS
-  image_subscriber_ = nh_.subscribe("image", 1, &MonoVO::imageCallback, this);
+  image_subscriber_ = new message_filters::Subscriber<sensor_msgs::Image>(nh_, "image", 1);
+  camera_info_subscriber_ = new message_filters::Subscriber<sensor_msgs::CameraInfo>(nh_, "camera_info", 1);
+  synchronizer_ = new message_filters::Synchronizer<sync_policy_t>(sync_policy_t(2), *image_subscriber_, *camera_info_subscriber_);
+  synchronizer_->registerCallback(boost::bind(&MonoVO::imageCallback, this, _1, _2));
+
   pose_publisher_ = nh_.advertise<geometry_msgs::PoseWithCovarianceStamped>("pose", 5);
 
   // OpenCV
@@ -43,6 +48,10 @@ MonoVO::MonoVO() :
 
 MonoVO::~MonoVO()
 {
+  delete synchronizer_;
+  delete image_subscriber_;
+  delete camera_info_subscriber_;
+
   delete rng_;
   delete feature_detector_;
   delete descriptor_extractor_;
@@ -56,15 +65,15 @@ MonoVO::~MonoVO()
   }
 }
 
-void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &msg)
+void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &image_msg, const sensor_msgs::CameraInfo::ConstPtr &info_msg)
 {
-  ROS_INFO_ONCE("first image received, encoding is %s", msg->encoding.c_str());
+  ROS_INFO_ONCE("first image received, encoding is %s", image_msg->encoding.c_str());
 
   // try converting image to OpenCV grayscale image format
   cv_bridge::CvImagePtr image;
   try
   {
-    image = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::MONO8);
+    image = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::MONO8);
   }
   catch (cv_bridge::Exception& e)
   {
@@ -75,10 +84,21 @@ void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &msg)
   // initialize if necessary
   if (!initialized_)
   {
-    if (ignore_images_ == 0)
+    if (ignore_images_ == 0) // throw away the first few images
     {
+      // camera calibration parameters
+      ROS_ASSERT_MSG(info_msg->distortion_model == sensor_msgs::distortion_models::PLUMB_BOB,
+                     "Expected distortion model to be %s, got %s.",
+                     sensor_msgs::distortion_models::PLUMB_BOB.c_str(),
+                     info_msg->distortion_model.c_str());
+      K_ = (cv::Mat_<double>(3,3) << info_msg->K[0], info_msg->K[1], info_msg->K[2],
+                                    info_msg->K[3], info_msg->K[4], info_msg->K[5],
+                                    info_msg->K[6], info_msg->K[7], info_msg->K[8]);
+      D_ = (cv::Mat_<double>(1,5) << info_msg->D[0], info_msg->D[1], info_msg->D[2], info_msg->D[3], info_msg->D[4]);
+
+      // keyframe image
       keyframe_image_ = image;
-      detectFeatures(keyframe_image_, &keyframe_keypoints_);
+      detectFeatures(keyframe_image_, &keyframe_keypoints_pixel_, &keyframe_keypoints_);
       computeDescriptors(keyframe_image_, &keyframe_keypoints_, &keyframe_descriptors_);
 
       initialized_ = true;
@@ -94,15 +114,16 @@ void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &msg)
   ROS_INFO_ONCE("initialized, %d features detected on keyframe image", (int)keyframe_keypoints_.size());
 
   // detect features
+  std::vector<cv::KeyPoint> keypoints_pixel;
   std::vector<cv::KeyPoint> keypoints;
-  detectFeatures(image, &keypoints);
+  detectFeatures(image, &keypoints_pixel, &keypoints);
 
   // draw keypoints on image and display
   if (display_)
   {
     cv::Mat image_keypoints;
     cv::drawKeypoints(image->image,
-                      keypoints,
+                      keypoints_pixel,
                       image_keypoints,
                       cv::Scalar::all(-1),
                       cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
@@ -137,7 +158,7 @@ void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &msg)
   start = ros::WallTime::now();
   runRANSAC(100, keyframe_correspondences, current_correspondences, &E, &P, &inliers);
   compute_time = ros::WallTime::now() - start;
-  ROS_INFO_THROTTLE(1, "%d iterations of RANSAC took %f seconds", 100, compute_time.toSec());
+  ROS_INFO_THROTTLE(1, "%d iterations of RANSAC took %f seconds, returned %d inliers", 100, compute_time.toSec(), (int)inliers.size());
 
   // draw correspondences and inliers on image and display
   if (display_)
@@ -164,9 +185,12 @@ void MonoVO::imageCallback(const sensor_msgs::Image::ConstPtr &msg)
   }
 }
 
-inline void MonoVO::detectFeatures(const cv_bridge::CvImagePtr &image, std::vector<cv::KeyPoint>* keypoints)
+inline void MonoVO::detectFeatures(const cv_bridge::CvImagePtr &image,
+                                   std::vector<cv::KeyPoint>* keypoints_pixel,
+                                   std::vector<cv::KeyPoint>* keypoints)
 {
    feature_detector_->detect(image->image, *keypoints);
+   cv::undistortPoints(*keypoints_pixel, *keypoints, K_, D_);
 }
 
 inline void MonoVO::computeDescriptors(const cv_bridge::CvImagePtr& image,

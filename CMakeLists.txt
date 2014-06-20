@@ -7,12 +7,14 @@ project(mono_vo)
 find_package(catkin REQUIRED COMPONENTS
   cv_bridge
   geometry_msgs
+  message_filters
   roscpp
   sensor_msgs
   std_msgs
 )
 
 ## System dependencies are found with CMake's conventions
+find_package(Boost REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
 
@@ -100,6 +102,7 @@ include_directories(
 )
 include_directories(
   ${catkin_INCLUDE_DIRS}
+  ${Boost_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
   ${OpenMP_INCLUDE_DIRS}
 )
@@ -126,6 +129,7 @@ target_link_libraries(5point
 )
 target_link_libraries(mono_vo_node
   ${catkin_LIBRARIES}
+  ${Boost_LIBRARIES}
   ${OpenCV_LIBRARIES}
   5point
 )
